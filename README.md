@@ -1,4 +1,5 @@
 # wheel-bipedal-robot-control
+<<<<<<< HEAD
 controller using PID for thigh and calf link and LQR for wheel 
 
 clone project
