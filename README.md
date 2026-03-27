@@ -22,7 +22,7 @@ static balance
 ```
 balance and move forward
 ```bash
- python main.py static_balance=True
+ python main.py static_balance=False
 ```
 
 
