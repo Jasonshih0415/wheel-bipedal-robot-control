@@ -24,4 +24,15 @@ balance and move forward
  python main.py static_balance=False
 ```
 
+### Tool
 
+robot viewer
+![image](./image/robot_viewer.png)
+
+###  References
+**Author:** Chen Ningzhan (google: 平衡步兵嵌入式技術文檔)  
+**File:** [Dynamic model of biped wheel robot.pdf](./Dynamic%20model%20of%20biped%20wheel%20robot.pdf)
+
+### Mujoco Result
+![image](./image/static_balance.png)
+![image](./image/param_log.png)
