@@ -119,7 +119,7 @@
   	<actuator>
 		<motor class="thigh" name="L_thigh" joint="L_hip2thigh"/>
 		<motor class="calf" name="L_calf" joint="L_thigh2calf"/>
-		<motor ctrlrange="-15 15" name="L_wheel" joint="L_calf2wheel"/>
+		<motor ctrlrange="-1500 1500" name="L_wheel" joint="L_calf2wheel"/>
 		<motor class="thigh" name="R_thigh" joint="R_hip2thigh"/>
 		<motor class="calf" name="R_calf" joint="R_thigh2calf"/>
 		<motor ctrlrange="-15 15" name="R_wheel" joint="R_calf2wheel"/>

@@ -1,13 +1,23 @@
 import numpy as np
-import mujoco
+import mujoco 
 import mujoco.viewer
 import time
 from numpy.linalg import inv
 import matplotlib.pyplot as plt
 import scipy.linalg
 from pynput import keyboard
+import pinocchio as pin
+import math
+import sys
 
-"""
+""" by mujoco_viewer, check the xml 
+<<------------- Actuator ------------->>
+actuator_index: 0 , name: L_thigh
+actuator_index: 1 , name: L_calf
+actuator_index: 2 , name: L_wheel
+actuator_index: 3 , name: R_thigh 大腿
+actuator_index: 4 , name: R_calf 小腿
+actuator_index: 5 , name: R_wheel 
 
 <<------------- Sensor ------------->>
 sensor_index: 0 , name: L_thigh_pos , dim: 1
@@ -35,37 +45,31 @@ sensor_index: 28 , name: frame_pos , dim: 3
 sensor_index: 31 , name: frame_lin_vel , dim: 3
 sensor_index: 34 , name: frame_ang_vel , dim: 3
 
+wheel pos :rad
+wheel vel :rad/s
 """
 
-# ==========================================
-# 1. Model Parameters
-# ==========================================
-
-# Robotic Parameters
-M = 6.442               # Total mass(From pinocchio) [kg]
-m = 0.28                # Single wheel mass [kg]
-d = 0.3291              # Wheel track [m]
+# Robotic Parameters from urdf
+M = 6.499               # Total mass(From pinocchio) [kg]
+m = 0.2805              # Single wheel mass [kg]    
+d = 0.3291              # Wheel track [m] #兩輪之間距離
 r = 0.07                # Wheel radius [m]
 g = 9.81                # Gravity [m/s^2]
 
-def LQR(current_l,pos=None):
+#control the chassis
+def LQR(current_l): 
+    #current_l: 擺桿質心到轉軸距離(機器人質心到底盤馬達轉軸的距離)
+    I_wheel  = (1/2)*m*(r**2)
+    J_p = (1/3)*M*(current_l**2) #對z軸轉動慣量,俯仰方向
+    J_delta  = (1/12)*M*(d**2) #對y軸轉動慣量,左右方向
 
-    # Moment of inertia
-    I_wheel = m * (r**2) / 2        # Wheel inertia around center
-    J_p = M * (current_l**2) / 3            # Body inertia around CG
-    J_delta = M * (d**2) / 12       # Body inertia due to wheel track
-
-    # ==========================================
-    # 2. LQR Controller
-    # ==========================================
-
-    term1 = (J_p + M * (current_l**2))
-    term2 = (M + (2 * m) + (2 * I_wheel / (r**2)))
-    term3 = (M * current_l)**2
-    Qeq = (term1 * term2) - term3
+    term1 = ( J_p + M * (current_l**2))
+    term2 = ((2 * m) + (2 * I_wheel / (r**2)))
+    term3 =  J_p * M
+    Qeq = (term1 * term2) + term3
 
     A23 = - ( (M**2) * (current_l**2) * g ) / Qeq   
-    A43 = ( M * current_l * g * term2 ) / Qeq
+    A43 = ( M * current_l * g * (M+term2) ) / Qeq
             
     A = np.array([
         [0, 1, 0,   0, 0, 0],
@@ -76,15 +80,19 @@ def LQR(current_l,pos=None):
         [0, 0, 0,   0, 0, 0]
     ])
 
+    #穩定性分析 pos value, not stable system, need control
+    #eigenvalue = np.linalg.eig(A)
+    #print(f"eigenvalue:{eigenvalue}") 
+
     term4 = r * ( (m * d) + ((I_wheel * d)/(r**2)) + (2 * J_delta / d)  ) 
     B21 = ( J_p + (M * (current_l**2)) + (M * current_l * r) ) / (Qeq * r)
     B22 = B21
-    B41 = -( ( (M * current_l) / r ) + term2 ) / Qeq
+    B41 = -( ( (M * current_l) / r ) + (M+term2) ) / Qeq
     B42 = B41
-    B61 = -1 / term4
-    B62 = 1 / term4
+    B61 = -1 / term4 #delta = (accel_r - accel_l)/d, set turn left be positive
+    B62 = 1 / term4 #in mujoco world z axis is going up(turm left be positive)
 
-    B = np.array([
+    B = np.array([ 
         [0,     0],
         [B21, B22],
         [0,     0],
@@ -93,97 +101,97 @@ def LQR(current_l,pos=None):
         [B61, B62]
     ])
 
-    Q = np.diag([0.0, 30.0, 800.0, 1.0, 1.0, 1.0]) 
-    R = np.array([[1.0, 0.0], [0.0, 1.0]]) 
+    Q = np.diag([1.0, 5.0, 300.0, 1.0, 1.0, 1.0]) #x, dx, p, dp, delta, d(delta)
+    R = np.array([[1.0, 0.0], [0.0, 1.0]])  #TL, TR 
 
     P = scipy.linalg.solve_continuous_are(A, B, Q, R)
-    K = np.linalg.inv(R) @ B.T @ P
-
-    np.set_printoptions(precision=2, suppress=True)
-    if(pos == "stand"):
-        print("Matrix A in Stand is: \n", A)
-        print("Matrix B in Stand is: \n", B)
-        print("Value K in Stand is: \n", K)
-    elif(pos == "squat"):
-        print("Matrix A in Squat is: \n", A)
-        print("Matrix B in Squat is: \n", B)
-        print("Value K in Squat is: \n", K)
-    else:
-        print("Matrix A:\n", A)
-        print("Matrix B:\n", B)
-        print("Value K is: ", K)
-        
-    print("\n")
+    K = np.linalg.inv(R) @ B.T @ P #No.24 (5)
     return K
 
-# ==========================================
-# 2. Define pose
-# ==========================================
+#control posture 
+def PD_control(target_q,q,kp,target_dq,dq,kd):
+    tau = (target_q - q)*kp + (target_dq - dq)*kd
+    return tau
 
-posSquat = np.array([1.27, -2.127, 0, 1.27, -2.127, 0])
+def get_l(model,data,q):
+    pin.centerOfMass(model, data, q)
+    pin.forwardKinematics(model, data, q) #joint
+    pin.updateFramePlacements(model, data) #frame base on joint
+    com_pos = data.com[0]
+    left_wheel_idx = model.getFrameId("L_calf2wheel")
+    wheel_pos = data.oMf[left_wheel_idx].translation
+    #print(f"機器人當前的質心位置 (x, y, z): {com_pos}")
+    #print(f"機器人輪子位置 (x, y, z): {wheel_pos}")
+    #print(com_pos[0] - wheel_pos[0])
+    l = ((com_pos[0]-wheel_pos[0])**2 + (com_pos[2]-wheel_pos[2])**2)**0.5
+    return l
 
-posStand = np.array([0.7, -1.5, 0, 0.7, -1.5, 0]) 
+def quat2Euler(quat):
+    w,x,y,z = quat
+    Pitch = math.asin(2*(w*y -x*z))
+    Yaw = math.atan2(2*(w*z+x*y),1-2*(y**2+z**2))
+    return Pitch, Yaw
 
-CGSquat = 0.23 
-CGStand = 0.314
+def get_robot_vel(data,r):
+    r_wheel_w = data.sensordata[8]
+    l_wheel_w = data.sensordata[11]
+    avg_wheel_w = (r_wheel_w+l_wheel_w)/2.0
+    avg_wheel_vel = avg_wheel_w *r
+    return avg_wheel_vel
 
-KSquat = LQR(CGSquat, pos="squat")
-KStand = LQR(CGStand, pos="stand")
-# ==========================================
-# 3. Helper Functions
-# ==========================================
-def get_euler(quat):
-    w, x, y, z = quat
-    t2 = 2.0 * (w*y - z*x)
-    t2 = np.clip(t2, -1.0, 1.0)
-    pitch = np.arcsin(t2)
-    t3 = 2.0 * (w*z + x*y)
-    t4 = 1.0 - 2.0 * (y*y + z*z)
-    yaw = np.arctan2(t3, t4)
-    return pitch, yaw
+def imu2com_error(imu,com,wheel): #IMU與質心的角度誤差
+    ax, ay, az = imu
+    bx, by, bz = com
+    cx, cy, cz = wheel
+    com_angle = math.atan2(bx-cx,bz-cz)
+    imu_angle = math.atan2(ax-cx,az-cz)
+    angle_error = com_angle-imu_angle
+    return angle_error
 
-def pd_control(target_q, q, kp, target_dq, dq, kd):
-    return (target_q - q) * kp + (target_dq - dq) * kd
+#PD setting
+target_q = np.array([0.86,-1.5,0,0.86,-1.5,0]) #check in robot viewer
+target_dq = np.array([0,0,0,0,0,0], dtype=np.float64) #stable in one place
+kp = np.array([50, 50 ,0, 50, 50, 0])
+kd = np.array([10, 10, 0, 10, 10, 0])
 
-# ==========================================
-# 4. Main Simulation
-# ==========================================
-modelPath = './crazydog_urdf/urdf/scene.xml'
-model = mujoco.MjModel.from_xml_path(modelPath)
+#posture setting for pin
+q_pin = np.array([
+    0.86,      # L_hip2thigh
+    -1.5,      # L_thigh2calf
+    0.0, 1.0, # L_calf2wheel 
+    0.86,      # R_hip2thigh
+    -1.5,     # R_thigh2calf
+    0.0, 1.0  # R_calf2wheel 
+])
+
+#load file
+modelPath_xml = './crazydog_urdf/urdf/scene.xml'
+model = mujoco.MjModel.from_xml_path(modelPath_xml)
 data = mujoco.MjData(model)
 
-# PD Gains
-kps = np.array([150, 200 ,0, 150, 200, 0])
-kds = np.array([30, 80, 0, 30, 80, 0])
+modelPath_urdf = "./crazydog_urdf/urdf/crazydog_urdf.urdf"
+model_pin = pin.buildModelFromUrdf(modelPath_urdf)
+data_pin = model_pin.createData()
+l = get_l(model_pin,data_pin,q_pin)
+distance =0
 
-# Logging
-logTime = []           
-logPitch = []          
-logwheelSpeed = []     
-logTorque = []
-logYaw = []
+#read arg
+static_balance = False
+if "static_balance=True" in sys.argv:
+    static_balance = True
 
-# ==========================================
-# Turning Control
-# ==========================================
-pressedKeys = set()
-def Press(key):
-    try:
-        pressedKeys.add(key)
-    except AttributeError:
-        pass
-
-def Release(key):
-    if key in pressedKeys:
-        pressedKeys.remove(key)
-
-listener = keyboard.Listener(on_press=Press, on_release=Release)
-listener.start()
-# ==========================================
-
+#logging
+log_time = []
+log_thigh = []
+log_calf = []
+log_pitch = []
+log_tau_r =[]
+log_tau_l =[]
+log_yaw = []
+log_distance = []
+log_vel = []
 
 with mujoco.viewer.launch_passive(model, data) as viewer:
-
     target_body_name = "base_link" 
     body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, target_body_name)
     viewer.cam.type = mujoco.mjtCamera.mjCAMERA_TRACKING
@@ -192,148 +200,110 @@ with mujoco.viewer.launch_passive(model, data) as viewer:
     viewer.cam.elevation = -20
     viewer.cam.azimuth = 90
 
-    lastTime = data.time
-    currentVelocity = 0.0
-    finalVelocity = 4.0
-    Acceleration = 0.2
-
-    torqueLimit = 15.0
-    lastTorque = 0.0
-    
-    targetYaw = 0.0
-    TurningSpeed = 0.3
-    recoverySpeed = 5.0
-
     while viewer.is_running():
+
         step_start = time.time()
-
-        turning = False
-        if keyboard.Key.left in pressedKeys:
-            targetYaw += TurningSpeed
-            turning = True
-        if keyboard.Key.right in pressedKeys:
-            targetYaw -= TurningSpeed
-            turning = True
-        
-        if not turning:
-            if targetYaw > 0:
-                targetYaw -= TurningSpeed * recoverySpeed
-                if targetYaw < 0: targetYaw = 0
-            elif targetYaw < 0:
-                targetYaw += TurningSpeed * recoverySpeed
-                if targetYaw > 0: targetYaw = 0 
-
-        targetYaw = np.clip(targetYaw, -50, 50)
-        target_yaw_rad = np.radians(targetYaw)
-
-        # Read Sensor data
+        #state 
         quat = data.sensordata[18:22]
-        gyro = data.sensordata[22:25]
-        gyroY = gyro[1]       
-        gyroZ = gyro[2]       
+        Pitch, Yaw = quat2Euler(quat)
+        gyro_y = data.sensordata[23]
+        gyro_z = data.sensordata[24]
+        robot_vel = get_robot_vel(data,r)
+        dt = model.opt.timestep
+        distance += robot_vel * dt    
 
-        leftWheelVelocity = data.sensordata[8]
-        rightWheelVelocity = data.sensordata[11]
-
-        pitch, yaw = get_euler(quat)
-        averageWheelVelocity = (leftWheelVelocity + rightWheelVelocity) / 2.0
-
-        currentTime = data.time
-        dt = currentTime - lastTime
-        lastTime = currentTime
-
-        start_run_time = 6.0
-        if currentTime < start_run_time:
-            currentVelocity = 0.15
-            
-        else:
-            if currentVelocity < finalVelocity:
-                currentVelocity += Acceleration * dt
-            
-            elif currentVelocity > finalVelocity:
-                currentVelocity = finalVelocity
-
-            if turning:
-                currentVelocity -= Acceleration * dt
-                if currentVelocity < 0: currentVelocity = 0
-
-        ratio = np.clip(abs(currentVelocity) / finalVelocity, 0.0, 1.0)
-        KCurrent = (1 - ratio) * KSquat + ratio * KStand
-        current_target_dof = (1 - ratio) * posSquat + ratio * posStand
-
-        yaw_error = yaw - target_yaw_rad
-
-        state = np.array([
-            0.0,
-            (averageWheelVelocity * r) - currentVelocity,
-            pitch,
-            gyroY,
-            yaw_error,
-            gyroZ
+        target_state = np.array([
+            0.0,       # target_distance
+            0.0,       # target_vel
+            0.0,       # target_pitch
+            0.0,       # target_gyro_y
+            0.0,       # target_yaw
+            0.0        # target_gyro_z
         ])
 
-        Torque_LQR = -KCurrent @ state
-        Torque_LQR[0] = np.clip(Torque_LQR[0], -15, 15)
-        Torque_LQR[1] = np.clip(Torque_LQR[1], -15, 15)
-        lastTorque = ( Torque_LQR[0] + Torque_LQR[1] ) / 2.0
-        
-        tau = pd_control(current_target_dof, data.sensordata[:6], kps, np.zeros(6), data.sensordata[6:12], kds)
+        if static_balance == False:
+            target_state[0] = distance
+            target_state[1] = 0.2
+            
+        state = np.array([
+            distance, 
+            robot_vel ,
+            Pitch ,
+            gyro_y,
+            Yaw,
+            gyro_z
+        ])
 
-        Stable_time = 0.3
-        if currentTime < Stable_time:
-            tau[2] = 0 
-            tau[5] = 0
-        else:
-            tau[2] = Torque_LQR[0]
-            tau[5] = Torque_LQR[1]
-
+        #control
+        k = LQR(l)
+        u = -k @ (state-target_state) 
+        tau = PD_control(target_q, data.sensordata[:6],kp, target_dq, data.sensordata[6:12],kd)
+        tau[2] = u[0] 
+        tau[5] = u[1] 
         data.ctrl[:] = tau
         mujoco.mj_step(model, data)
         viewer.sync()
-        
-        # Logging
-        logTime.append(data.time)
-        logPitch.append(np.degrees(pitch))
-        logwheelSpeed.append(averageWheelVelocity * r)
-        logTorque.append(Torque_LQR[0]) 
-        logYaw.append(np.degrees(yaw_error))
+
+        #log 
+        log_time.append(data.time)
+        log_thigh.append(data.sensordata[0]) 
+        log_calf.append(data.sensordata[1]) 
+        log_pitch.append(Pitch)
+        log_yaw.append(Yaw)
+        log_tau_l.append(tau[2])
+        log_tau_r.append(tau[5])
+        log_distance.append(distance)
+        log_vel.append(robot_vel)
+        com_pos = data.subtree_com[0]
+
+        #imu and center of mass error
+        wheel_pos = data.xpos[8]
+        imu_pos = data.sensordata[28:31]
+        angle_error = imu2com_error(imu_pos,com_pos,wheel_pos)
 
         # Loop timing
         time_until_next = model.opt.timestep - (time.time() - step_start)
         if time_until_next > 0:
             time.sleep(time_until_next)
 
-listener.stop()
+plt.figure(figsize=(12,10))
 
-# ==========================================
-# 5. Plotting
-# ==========================================
-plt.figure(figsize=(12, 10))
-
-plt.subplot(4, 1, 1)
-plt.plot(logTime, logPitch, label='Pitch (deg)')
-# plt.axhline(pitchLimit, color='r', linestyle='--')
-plt.title('Body Pitch Angle')
+plt.subplot(2,3,1)
+plt.plot(log_time,log_pitch,label='rad')
+plt.title('pitch')
+plt.axhline(target_state[2],color ='red', linestyle = '--')
 plt.grid(True)
 plt.legend()
 
-plt.subplot(4, 1, 2)
-plt.plot(logTime, logwheelSpeed, label='Velocity (m/s)', color='orange')
-plt.axhline(finalVelocity, color='r', linestyle='--', label='Target')
-plt.ylim(0, finalVelocity + 1)
-plt.title('Wheels Velocity')
+plt.subplot(2,3,2)
+plt.plot(log_time,log_vel,label='m')
+plt.title('vel_robot')
 plt.grid(True)
 plt.legend()
 
-plt.subplot(4, 1, 3)
-plt.plot(logTime, logTorque, label='Torque (Nm)', color='green')
-plt.title('Wheels Torque')
+plt.subplot(2,3,3)
+plt.plot(log_time,log_tau_l,label='N-m')
+plt.title('tau_l_wheel')
 plt.grid(True)
 plt.legend()
 
-plt.subplot(4, 1, 4)
-plt.plot(logTime, logYaw, label='Yaw Error (deg)', color='purple')
-plt.title('Body Yaw Angle')
+plt.subplot(2,3,4)
+plt.plot(log_time,log_tau_r,label='N-m')
+plt.title('tau_r_wheel')
+plt.grid(True)
+plt.legend()
+
+plt.subplot(2,3,5)
+plt.plot(log_time,log_thigh,label='rad')
+plt.title('thigh_angle')
+plt.axhline(q_pin[0],color ='red', linestyle = '--')
+plt.grid(True)
+plt.legend()
+
+plt.subplot(2,3,6)
+plt.plot(log_time,log_calf,label='N-m')
+plt.title('calf_angle')
+plt.axhline(q_pin[1],color ='red', linestyle = '--')
 plt.grid(True)
 plt.legend()
 

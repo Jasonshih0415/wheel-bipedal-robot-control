@@ -1,0 +1,4 @@
+__pycache__/
+.vscode/
+MUJOCO_LOG.TXT
+*pyc
